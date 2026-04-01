@@ -28,8 +28,8 @@ class StudentStatusChoices(models.TextChoices):
     PASSED = 'passed', 'Passed'
     SUMMER = 'summer', 'Summer Course'
     RETAKE_YEAR = 'retake_year', 'Retake Year'
-    DROPPED_OUT = 'dropped_out', 'Dropped Out'   # ✅ جديد
-    GRADUATED = 'graduated', 'Graduated'          # ✅ جديد
+    DROPPED_OUT = 'dropped_out', 'Dropped Out'
+    GRADUATED = 'graduated', 'Graduated'
 
 
 # ===============================
@@ -90,14 +90,28 @@ class CourseRegistration(models.Model):
     grade = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
     status = models.CharField(
         max_length=15,
-        choices=[('in_progress', 'In Progress'),
-                 ('passed', 'Passed'),
-                 ('failed', 'Failed')],
+        choices=[
+            ('in_progress', 'In Progress'),
+            ('passed', 'Passed'),
+            ('failed', 'Failed'),
+        ],
         default='in_progress'
     )
 
     def __str__(self):
         return f"{self.student.name} - {self.course.name} ({self.get_status_display()})"
+
+    # =========================================================
+    # 👨‍🏫 الدكتور المسؤول عن المادة (عن طريق GradeSheet)
+    # =========================================================
+    @property
+    def doctor(self):
+        """
+        بيرجع الدكتور المسؤول عن المادة دي عن طريق الـ GradeSheet.
+        مفيش داتا مكررة — مصدر وحيد للحقيقة.
+        """
+        sheet = getattr(self.course, 'main_grade_sheet', None)
+        return sheet.doctor if sheet else None
 
 
 # ===============================
@@ -105,9 +119,21 @@ class CourseRegistration(models.Model):
 # ===============================
 
 class SummerCourseRegistration(models.Model):
-    student = models.ForeignKey('accounts.Student', on_delete=models.CASCADE, related_name='summer_registrations')
-    structure = models.ForeignKey('structure.StudentStructure', on_delete=models.CASCADE, related_name='summer_registrations')
-    course = models.ForeignKey('courses.Course', on_delete=models.CASCADE, related_name='summer_courses')
+    student = models.ForeignKey(
+        'accounts.Student',
+        on_delete=models.CASCADE,
+        related_name='summer_registrations'
+    )
+    structure = models.ForeignKey(
+        'structure.StudentStructure',
+        on_delete=models.CASCADE,
+        related_name='summer_registrations'
+    )
+    course = models.ForeignKey(
+        'courses.Course',
+        on_delete=models.CASCADE,
+        related_name='summer_courses'
+    )
 
     final_exam_full_score = models.FloatField(null=True, blank=True)
     student_final_score = models.FloatField(null=True, blank=True)
@@ -120,6 +146,19 @@ class SummerCourseRegistration(models.Model):
 
     def __str__(self):
         return f"Summer - {self.student.name} - {self.course.name} ({self.state})"
+
+    # =========================================================
+    # 👨‍🏫 الدكتور المسؤول (عن طريق GradeSheet)
+    # =========================================================
+    @property
+    def doctor(self):
+        """
+        نفس الدكتور اللي حط الدرجة في المادة الأصلية —
+        بيجيبه عن طريق course → GradeSheet → doctor.
+        مفيش FK إضافي ومفيش داتا مكررة.
+        """
+        sheet = getattr(self.course, 'main_grade_sheet', None)
+        return sheet.doctor if sheet else None
 
     def evaluate_result(self):
         if self.student_final_score is None or not self.final_exam_full_score:
@@ -135,9 +174,21 @@ class SummerCourseRegistration(models.Model):
 # ===============================
 
 class RepeatCourseRegistration(models.Model):
-    student = models.ForeignKey('accounts.Student', on_delete=models.CASCADE, related_name='repeat_registrations')
-    structure = models.ForeignKey('structure.StudentStructure', on_delete=models.CASCADE, related_name='repeat_registrations')
-    course = models.ForeignKey('courses.Course', on_delete=models.CASCADE, related_name='repeat_courses')
+    student = models.ForeignKey(
+        'accounts.Student',
+        on_delete=models.CASCADE,
+        related_name='repeat_registrations'
+    )
+    structure = models.ForeignKey(
+        'structure.StudentStructure',
+        on_delete=models.CASCADE,
+        related_name='repeat_registrations'
+    )
+    course = models.ForeignKey(
+        'courses.Course',
+        on_delete=models.CASCADE,
+        related_name='repeat_courses'
+    )
     retake_attempt_number = models.PositiveSmallIntegerField(default=0)
     final_exam_full_score = models.FloatField(null=True, blank=True)
     student_final_score = models.FloatField(null=True, blank=True)
@@ -150,6 +201,19 @@ class RepeatCourseRegistration(models.Model):
 
     def __str__(self):
         return f"Repeat - {self.student.name} - {self.course.name} ({self.state})"
+
+    # =========================================================
+    # 👨‍🏫 الدكتور المسؤول (عن طريق GradeSheet)
+    # =========================================================
+    @property
+    def doctor(self):
+        """
+        نفس الدكتور المسؤول عن المادة في كل مراحلها —
+        سواء regular أو repeat.
+        بيجيبه عن طريق course → GradeSheet → doctor.
+        """
+        sheet = getattr(self.course, 'main_grade_sheet', None)
+        return sheet.doctor if sheet else None
 
     def evaluate_result(self):
         if self.student_final_score is None or not self.final_exam_full_score:
@@ -165,10 +229,30 @@ class RepeatCourseRegistration(models.Model):
 # ===============================
 
 class CarryCourse(models.Model):
-    student = models.ForeignKey('accounts.Student', on_delete=models.CASCADE, related_name='carry_records')
-    course = models.ForeignKey('courses.Course', on_delete=models.CASCADE, related_name='carried_instances')
-    from_structure = models.ForeignKey('structure.StudentStructure', on_delete=models.SET_NULL, null=True, blank=True, related_name='carry_from')
-    to_structure = models.ForeignKey('structure.StudentStructure', on_delete=models.SET_NULL, null=True, blank=True, related_name='carry_to')
+    student = models.ForeignKey(
+        'accounts.Student',
+        on_delete=models.CASCADE,
+        related_name='carry_records'
+    )
+    course = models.ForeignKey(
+        'courses.Course',
+        on_delete=models.CASCADE,
+        related_name='carried_instances'
+    )
+    from_structure = models.ForeignKey(
+        'structure.StudentStructure',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='carry_from'
+    )
+    to_structure = models.ForeignKey(
+        'structure.StudentStructure',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='carry_to'
+    )
 
     final_exam_full_score = models.FloatField(null=True, blank=True)
     student_final_score = models.FloatField(null=True, blank=True)
@@ -182,6 +266,18 @@ class CarryCourse(models.Model):
 
     def __str__(self):
         return f"Carry - {self.student.name} - {self.course.name} ({self.state})"
+
+    # =========================================================
+    # 👨‍🏫 الدكتور المسؤول (عن طريق GradeSheet)
+    # =========================================================
+    @property
+    def doctor(self):
+        """
+        المادة المترحلة مسؤول عنها نفس دكتور المادة الأصلية —
+        بيجيبه عن طريق course → GradeSheet → doctor.
+        """
+        sheet = getattr(self.course, 'main_grade_sheet', None)
+        return sheet.doctor if sheet else None
 
     def evaluate_result(self):
         if self.student_final_score is None or not self.final_exam_full_score:

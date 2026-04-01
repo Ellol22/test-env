@@ -16,25 +16,22 @@ Including another URLconf
 """
 from django.contrib import admin
 from django.urls import path , include
-from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 from django.conf.urls.static import static
 from django.conf import settings
 
 urlpatterns = [
     path('admin/', admin.site.urls), # admin
-    path('api/token/', TokenObtainPairView.as_view(), name='token_obtain_pair'), # token
-    path('api/token/refresh/', TokenRefreshView.as_view(), name='token_refresh'), # token
     path("accounts/",include('accounts.urls')), # accounts
-    # path("dashboard/",include('dashboard.urls')), # dashboard
+    path("dashboard/",include('dashboard.urls')), # dashboard
     # path('attendance/', include('attendance.urls')), # attendance
     # path("schedule/" , include("schedule.urls")), # schedule
     # path("chat/", include("chatbot.urls")),  # chatbot
-    # path("upload/", include("upload_center.urls")),  # upload center
-    # path("recommend/", include("recommendation.urls")), # recommendation
-    # path("grades/", include("grades.urls")), # Grades
+    path("upload/", include("upload_center.urls")),  # upload center
+    path("recommend/", include("recommendation.urls")), # recommendation
+    path("grades/", include("grades.urls")), # Grades
     # path("api/", include("quiz.urls")), # quiz
-    # path("api/", include("courses.urls")), # Courses
-    path("records", include("student_records.urls")), # student_records
+    path("api/", include("courses.urls")), # Courses
+    path("records/", include("student_records.urls")), # student_records
 ] +static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
 
 urlpatterns += static(settings.STATIC_URL, document_root=settings.STATIC_ROOT)
