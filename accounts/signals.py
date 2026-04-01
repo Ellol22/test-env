@@ -1,5 +1,5 @@
 # 📁 accounts/signals.py
-from django.db.models.signals import post_save
+from django.db.models.signals import post_save, pre_save
 from django.dispatch import receiver
 from .models import Student
 from structure.models import (
@@ -11,19 +11,6 @@ from structure.models import (
 )
 from courses.models import Course
 from grades.models import GradeSheet, StudentGrade
-from django.db.models.signals import pre_save
-
-
-# =========================================================
-# 🎯 دالة إنشاء أو تحديث الاستراكتشر
-# =========================================================
-def get_or_create_structure(student, status):
-    structure, created = StudentStructure.objects.get_or_create(
-        department=student.department,
-        year=student.year,
-        status=status,
-    )
-    return structure
 
 
 # =========================================================
@@ -34,11 +21,7 @@ def auto_assign_courses_and_grades(student):
     if not structure:
         return
 
-    # -----------------------------
-    # الحالة 1️⃣: Active (طالب عادي)
-    # -----------------------------
     if structure.status == StudentStatusChoices.ACTIVE:
-        # نطبق فقط على السنوات الدراسية العادية (First / Second / Third / Fourth)
         if structure.year not in ["First", "Second", "Third", "Fourth"]:
             return
 
@@ -48,7 +31,6 @@ def auto_assign_courses_and_grades(student):
         )
 
         for course in courses:
-            # تسجيل الطالب في الكورس
             course_reg, _ = CourseRegistration.objects.get_or_create(
                 student=student,
                 structure=structure,
@@ -56,7 +38,6 @@ def auto_assign_courses_and_grades(student):
                 defaults={'status': 'in_progress'},
             )
 
-            # إنشاء GradeSheet لو مش موجود
             grade_sheet, _ = GradeSheet.objects.get_or_create(
                 course=course,
                 defaults={
@@ -68,7 +49,6 @@ def auto_assign_courses_and_grades(student):
                 },
             )
 
-            # إنشاء StudentGrade
             StudentGrade.objects.get_or_create(
                 grade_sheet=grade_sheet,
                 student=student,
@@ -76,11 +56,7 @@ def auto_assign_courses_and_grades(student):
                 course_registration=course_reg,
             )
 
-    # -----------------------------
-    # الحالة 2️⃣: Summer course
-    # -----------------------------
     elif structure.status == StudentStatusChoices.SUMMER:
-        # تسجيل المواد الساقطة فقط في SummerCourseRegistration
         courses = structure.failed_courses.all()
         for course in courses:
             SummerCourseRegistration.objects.get_or_create(
@@ -89,49 +65,35 @@ def auto_assign_courses_and_grades(student):
                 course=course,
                 defaults={'state': '-'},
             )
-        # لا ننشئ Grades هنا
 
-    # -----------------------------
-    # الحالة 3️⃣: Retake year
-    # -----------------------------
     elif structure.status == StudentStatusChoices.RETAKE_YEAR:
-        # تسجيل جميع المواد في RepeatCourseRegistration
-        courses = Course.objects.filter(
-            structure__department=structure.department,
-            structure__year=structure.year,
-        )
-
-        for course in courses:
-            RepeatCourseRegistration.objects.get_or_create(
-                student=student,
-                structure=structure,
-                course=course,
-                defaults={'state': '-'},
-            )
-        # لا ننشئ Grades هنا
-
-    # -----------------------------
-    # الحالة 4️⃣: Passed student
-    # -----------------------------
-    elif structure.status == StudentStatusChoices.PASSED:
-        next_year_structure, _ = StudentStructure.objects.get_or_create(
-            department=structure.department,
-            year=structure.year.get_next(),
-            status=StudentStatusChoices.ACTIVE,
-        )
-        student.current_structure = next_year_structure
-        student.save(update_fields=['current_structure'])
+    # ⛔ الـ action هو المسؤول عن إضافة RepeatCourseRegistration
+    # الـ signal لا تتدخل هنا عشان متضيفش كل مواد السنة
+        return
 
 
+# =========================================================
+# 🔍 pre_save: نحفظ الـ structure القديمة قبل الـ save
+# =========================================================
+@receiver(pre_save, sender=Student)
+def track_structure_change(sender, instance, **kwargs):
+    if instance.pk:
+        try:
+            instance._old_structure = Student.objects.get(pk=instance.pk).current_structure
+        except Student.DoesNotExist:
+            instance._old_structure = None
+    else:
+        instance._old_structure = None
 
 
+# =========================================================
+# 📝 post_save: إضافة الـ structure للـ history
+# =========================================================
 @receiver(post_save, sender=Student)
 def add_current_structure_to_history(sender, instance, created, **kwargs):
     if not instance.current_structure:
-        print(f"[Signal] No current_structure set for {instance.name}")
         return
 
-    # نعمل نسخة dict من current_structure
     new_struct = {
         'id': instance.current_structure.id,
         'department': instance.current_structure.department,
@@ -139,36 +101,42 @@ def add_current_structure_to_history(sender, instance, created, **kwargs):
         'status': instance.current_structure.status,
     }
 
-    # نضيفها لو مش موجودة بالفعل
     history = instance.structures_history or []
     if new_struct not in history:
         history.append(new_struct)
         instance.structures_history = history
-        # ⚠️ بدون إعادة save داخل post_save ممكن يحصل RecursionError
         Student.objects.filter(pk=instance.pk).update(structures_history=history)
         print(f"[Signal] Added {new_struct} to history for {instance.name}")
     else:
         print(f"[Signal] {new_struct} already in history")
 
-# # =========================================================
-# # 🚀 signal لما طالب يتسجل أو يتحدث
-# # =========================================================
+
+# =========================================================
+# 🚀 post_save: توزيع المواد والجريد
+# =========================================================
 @receiver(post_save, sender=Student)
 def create_student_structure_and_courses(sender, instance, created, **kwargs):
     student = instance
 
-    # ❗ نتأكد إننا في أول مرة فقط
     if created:
-        # تأكيد وجود current_structure
+        # أول مرة: نتأكد من وجود current_structure
         if not student.current_structure:
             structure, _ = StudentStructure.objects.get_or_create(
                 department=student.department,
                 year=student.year,
                 status=StudentStatusChoices.ACTIVE,
             )
-            # تحديث مباشر بدون استدعاء السيجنال
             Student.objects.filter(pk=student.pk).update(current_structure=structure)
             student.current_structure = structure
 
-        # 🎯 تسجيل المواد وإنشاء الجريد
         auto_assign_courses_and_grades(student)
+
+    else:
+        # ✅ لو الـ structure اتغير → شغّل التوزيع تاني
+        old_structure = getattr(student, '_old_structure', None)
+        if (
+            student.current_structure is not None
+            and old_structure != student.current_structure
+        ):
+            print(f"[Signal] Structure changed for {student.name}: {old_structure} → {student.current_structure}")
+            auto_assign_courses_and_grades(student)

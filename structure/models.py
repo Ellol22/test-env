@@ -28,6 +28,8 @@ class StudentStatusChoices(models.TextChoices):
     PASSED = 'passed', 'Passed'
     SUMMER = 'summer', 'Summer Course'
     RETAKE_YEAR = 'retake_year', 'Retake Year'
+    DROPPED_OUT = 'dropped_out', 'Dropped Out'   # ✅ جديد
+    GRADUATED = 'graduated', 'Graduated'          # ✅ جديد
 
 
 # ===============================
@@ -107,8 +109,8 @@ class SummerCourseRegistration(models.Model):
     structure = models.ForeignKey('structure.StudentStructure', on_delete=models.CASCADE, related_name='summer_registrations')
     course = models.ForeignKey('courses.Course', on_delete=models.CASCADE, related_name='summer_courses')
 
-    final_exam_full_score = models.FloatField(null=True, blank=True)  # الدرجة الكاملة من جدول الجريد
-    student_final_score = models.FloatField(null=True, blank=True)    # الدرجة اللي الدكتور يدخلها
+    final_exam_full_score = models.FloatField(null=True, blank=True)
+    student_final_score = models.FloatField(null=True, blank=True)
     state = models.CharField(
         max_length=20,
         choices=[('مقبول', 'مقبول'), ('راسب', 'راسب'), ('-', 'لم يحدد بعد')],
@@ -120,7 +122,6 @@ class SummerCourseRegistration(models.Model):
         return f"Summer - {self.student.name} - {self.course.name} ({self.state})"
 
     def evaluate_result(self):
-        """تقييم النتيجة بناءً على درجة الطالب في الفاينل"""
         if self.student_final_score is None or not self.final_exam_full_score:
             return
         percentage = (self.student_final_score / self.final_exam_full_score) * 100

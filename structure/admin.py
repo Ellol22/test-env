@@ -24,45 +24,44 @@ def get_model(app_label, model_name):
     return apps.get_model(app_label, model_name)
 
 # -----------------------
-# Helper: إنشاء سجل Graduation (لنأخذ snapshot من الهياكل)
+# Helper: إنشاء سجل Graduation
 # -----------------------
 def create_graduation_record(student):
     Graduation = get_model('student_records', 'Graduation')
     if not Graduation:
         return None
+
     grad, created = Graduation.objects.get_or_create(student=student)
-    # نربط كل الهياكل اللي الطالب مرّ بيها (structures موجودة على Student)
-    try:
-        grad.structures.set(student.structures.all())
-    except Exception:
-        pass
+
+    # ✅ نجيب الـ structures من structures_history الصح
+    history = student.structures_history or []
+    struct_ids = [item.get("id") for item in history if item.get("id")]
+    structures = StudentStructure.objects.filter(id__in=struct_ids)
+    grad.structures.set(structures)
+
     grad.graduated_at = timezone.now()
     grad.save(update_fields=['graduated_at'])
+
+    # ✅ تغيير current_structure للطالب إلى graduated
+    if student.current_structure:
+        graduated_structure, _ = StudentStructure.objects.get_or_create(
+            department=student.current_structure.department,
+            year=student.current_structure.year,
+            status=StudentStatusChoices.GRADUATED,
+        )
+        Student.objects.filter(pk=student.pk).update(
+            current_structure=graduated_structure
+        )
+        # ✅ نحدث الـ instance في الذاكرة كمان
+        student.current_structure = graduated_structure
+        print(f"[Graduation] {student.name} moved to graduated structure")
+
     return grad
-
-# -----------------------
-# Helper: نسخ instance بسيط (shallow clone) وحفظه
-# -----------------------
-def _clone_instance(inst, exclude_fields=None):
-    exclude_fields = set(exclude_fields or [])
-    Model = inst.__class__
-    data = {}
-    for f in inst._meta.fields:
-        if f.auto_created or f.primary_key:
-            continue
-        if f.name in exclude_fields:
-            continue
-        # يُنسخ القيمة الحالية (ForeignKey سيُنسخ كقيمة id أو object حسب الحالة)
-        data[f.name] = getattr(inst, f.name)
-    return Model.objects.create(**data)
-
-
 
 
 def archive_student_before_drop(student, dropped_record):
     """
-    مسؤول عن أرشفة كل بيانات الطالب داخل DroppedOut record
-    قبل ما الطالب يخرج نهائي.
+    أرشفة كل بيانات الطالب داخل DroppedOut record قبل ما يخرج نهائي.
     """
     from structure.models import (
         StudentStructure,
@@ -73,17 +72,13 @@ def archive_student_before_drop(student, dropped_record):
     )
     from grades.models import StudentGrade
 
-    # ----------------------------
     # 1) أرشفة structures_history → M2M
-    # ----------------------------
     history = student.structures_history or []
     struct_ids = [item.get("id") for item in history if item.get("id")]
     structures = StudentStructure.objects.filter(id__in=struct_ids)
     dropped_record.structures.set(structures)
 
-    # ----------------------------
-    # 2) أرشفة المواد العادية مع كل الدرجات + full marks
-    # ----------------------------
+    # 2) أرشفة المواد العادية مع كل الدرجات
     for reg in CourseRegistration.objects.filter(student=student):
         try:
             grade = StudentGrade.objects.get(student=student, course_registration=reg)
@@ -104,11 +99,7 @@ def archive_student_before_drop(student, dropped_record):
             is_passed=grade.is_passed if grade else None
         )
 
-    # ----------------------------
     # 3) أرشفة Summer
-    # ----------------------------
-    from structure.models import SummerCourseRegistration, RepeatCourseRegistration, CarryCourse
-
     for reg in SummerCourseRegistration.objects.filter(student=student):
         dropped_record.courses.create(
             course_name=reg.course.name,
@@ -117,9 +108,7 @@ def archive_student_before_drop(student, dropped_record):
             final_exam_full_score=reg.final_exam_full_score
         )
 
-    # ----------------------------
     # 4) أرشفة Repeat
-    # ----------------------------
     for reg in RepeatCourseRegistration.objects.filter(student=student):
         dropped_record.courses.create(
             course_name=reg.course.name,
@@ -128,9 +117,7 @@ def archive_student_before_drop(student, dropped_record):
             final_exam_full_score=reg.final_exam_full_score
         )
 
-    # ----------------------------
     # 5) أرشفة Carry
-    # ----------------------------
     for reg in CarryCourse.objects.filter(student=student):
         dropped_record.courses.create(
             course_name=reg.course.name,
@@ -142,26 +129,31 @@ def archive_student_before_drop(student, dropped_record):
     dropped_record.save()
 
 
-
-
-
 def create_droppedout_record_and_archive(student, reason=None):
     from student_records.models import DroppedOut
 
-    # لو أصلاً موجود DroppedOut record… رجّعه
     dropped, created = DroppedOut.objects.get_or_create(student=student)
 
     # أرشفة البيانات بالكامل
     archive_student_before_drop(student, dropped)
 
-    # ممكن تضيف سبب لو عندك في الموديل
-    print(f"[DroppedOut] Student {student.name} archived and dropped. Reason: {reason}")
+    # ✅ تغيير current_structure للطالب إلى dropped_out
+    if student.current_structure:
+        dropped_structure, _ = StudentStructure.objects.get_or_create(
+            department=student.current_structure.department,
+            year=student.current_structure.year,
+            status=StudentStatusChoices.DROPPED_OUT,
+        )
+        Student.objects.filter(pk=student.pk).update(current_structure=dropped_structure)
+        # نحدث الـ instance في الذاكرة كمان عشان أي كود بعده يشوف التغيير
+        student.current_structure = dropped_structure
+        print(f"[DroppedOut] {student.name} moved to dropped_out structure. Reason: {reason}")
 
     return dropped
 
 
 # =========================================================
-# 🎯 الأكشن: التقييم السنوي (الشروط: نجاح كامل -> ترحيل؛ سقوط -> سمر)
+# 🎯 الأكشن: التقييم السنوي
 # =========================================================
 @admin.action(description="تقييم سنوي شامل (اعتمادًا على نتائج الطلاب) — تنفيذ الانتقالات (Active / Summer / Graduation)")
 def evaluate_annual_performance(modeladmin, request, queryset):
@@ -191,7 +183,6 @@ def evaluate_annual_performance(modeladmin, request, queryset):
             course_regs = CourseRegistration.objects.filter(student=student, structure=structure)
             carry_courses = CarryCourse.objects.filter(student=student)
 
-            # تقييم مواد الكاري
             for cc in carry_courses:
                 if not cc.is_evaluated:
                     cc.evaluate_result()
@@ -200,7 +191,6 @@ def evaluate_annual_performance(modeladmin, request, queryset):
             failed_carry = carry_courses.filter(state='راسب')
             total_failed = failed_normal.count() + failed_carry.count()
 
-            # كله ناجح -> انتقل للسنة التالية
             if total_failed == 0:
                 promoted += 1
                 next_year = YEAR_MAP.get(structure.year, structure.year)
@@ -210,20 +200,17 @@ def evaluate_annual_performance(modeladmin, request, queryset):
                     status=StudentStatusChoices.ACTIVE
                 )
                 student.current_structure = next_structure
-                # نضيف الاستراكتشر الحالي إلى الـ history
                 try:
                     student.structures.add(structure)
                 except Exception:
                     pass
                 student.save(update_fields=['current_structure'])
 
-                # لو السنة اللي خلصها كانت Fourth -> Graduation
                 if structure.year == "Fourth":
                     create_graduation_record(student)
                     graduated += 1
                 continue
 
-            # لو فيه أي مادة راسبة -> يدخل Summer
             summer_structure, _ = StudentStructure.objects.get_or_create(
                 department=structure.department,
                 year=structure.year,
@@ -232,7 +219,6 @@ def evaluate_annual_performance(modeladmin, request, queryset):
             student.current_structure = summer_structure
             student.save(update_fields=['current_structure'])
 
-            # تسجيل المواد الراسبة في سمر
             for f in failed_normal:
                 gs = GradeSheet.objects.filter(course=f.course).first()
                 final_full_score = gs.final_exam_full_score if gs else None
@@ -252,7 +238,6 @@ def evaluate_annual_performance(modeladmin, request, queryset):
                     course=c.course,
                     defaults={'final_exam_full_score': final_full_score}
                 )
-                # تأكد من وجود carry record مع الدرجة الكاملة
                 CarryCourse.objects.update_or_create(
                     student=student,
                     course=c.course,
@@ -266,7 +251,7 @@ def evaluate_annual_performance(modeladmin, request, queryset):
 
 
 # =========================================================
-# 🎯 الأكشن: تقييم السمر كورس وتحديد الترحيل النهائي
+# 🎯 الأكشن: تقييم السمر كورس
 # =========================================================
 @admin.action(description="تقييم السمر كورس وتحديد الترحيل النهائي (Carry / Retake / Active / Graduation / DroppedOut)")
 def evaluate_summer_courses(modeladmin, request, queryset):
@@ -285,13 +270,22 @@ def evaluate_summer_courses(modeladmin, request, queryset):
     passed = carry = retake = graduated = dropped = 0
 
     for structure in queryset:
+    # ✅ نتأكد إن الـ structure دي summer فعلاً
+        if structure.status != StudentStatusChoices.SUMMER:
+            continue
+
         students = Student.objects.filter(summer_registrations__structure=structure).distinct()
         for student in students:
-            regs = SummerModel.objects.filter(student=student, structure=structure).select_related('course')
+            # ✅ بس اللي مش متقيَّم
+            regs = SummerModel.objects.filter(
+                student=student,
+                structure=structure,
+                is_evaluated=False
+            ).select_related('course')
+
             if not regs.exists():
                 continue
 
-            # تقييم كل سجل سمر
             for reg in regs:
                 gs = GradeSheet.objects.filter(course=reg.course).first()
                 if gs and (reg.final_exam_full_score is None or reg.final_exam_full_score != gs.final_exam_full_score):
@@ -301,9 +295,9 @@ def evaluate_summer_courses(modeladmin, request, queryset):
 
             failed_courses = {reg.course for reg in regs if reg.state == 'راسب'}
             failed_count = len(failed_courses)
-
+            
             # ----------------------------
-            # حالة النجاح الكامل
+            # نجاح كامل
             # ----------------------------
             if failed_count == 0:
                 passed += 1
@@ -314,17 +308,63 @@ def evaluate_summer_courses(modeladmin, request, queryset):
                 )
                 student.current_structure = nxt
                 student.save(update_fields=['current_structure'])
-                # Graduation
                 if structure.year == "Fourth":
-                    from structure.admin import create_graduation_record
                     create_graduation_record(student)
                     graduated += 1
                 continue
 
             # ----------------------------
-            # حالة 1-2 مواد راسبة -> Carry
+            # 1-2 مواد راسبة
             # ----------------------------
             if failed_count < 3:
+                if structure.year == "Fourth":
+                    # ✅ نتحقق الأول: هل تجاوز المحاولتين؟
+                    should_drop = False
+                    for course in failed_courses:
+                        max_prev = RepeatModel.objects.filter(
+                            student=student, course=course
+                        ).aggregate(m=Max('retake_attempt_number'))['m'] or 0
+                        if max_prev >= 2:
+                            should_drop = True
+                            break
+
+                    if should_drop:
+                        create_droppedout_record_and_archive(
+                            student,
+                            reason='Exceeded repeat attempts in Fourth year'
+                        )
+                        dropped += 1
+                        continue  # ✅ مش break
+
+                    retake += 1
+                    retake_structure, _ = StudentStructure.objects.get_or_create(
+                        department=structure.department,
+                        year=structure.year,
+                        status=StudentStatusChoices.RETAKE_YEAR
+                    )
+                    student.current_structure = retake_structure
+                    student.save(update_fields=['current_structure'])
+
+                    for course in failed_courses:
+                        max_prev = RepeatModel.objects.filter(
+                            student=student, course=course
+                        ).aggregate(m=Max('retake_attempt_number'))['m'] or 0
+                        new_attempt = max_prev + 1
+                        gs = GradeSheet.objects.filter(course=course).first()
+                        RepeatModel.objects.get_or_create(
+                            student=student,
+                            structure=retake_structure,
+                            course=course,
+                            retake_attempt_number=new_attempt,
+                            defaults={
+                                'final_exam_full_score': gs.final_exam_full_score if gs else None,
+                                'state': '-',
+                                'is_evaluated': False
+                            }
+                        )
+                    continue
+
+                # سنة عادية → Carry عادي
                 carry += 1
                 for course in failed_courses:
                     CarryCourse.objects.get_or_create(
@@ -342,7 +382,7 @@ def evaluate_summer_courses(modeladmin, request, queryset):
                 continue
 
             # ----------------------------
-            # حالة 3+ مواد راسبة -> Retake Year
+            # 3+ مواد راسبة -> Retake Year
             # ----------------------------
             retake += 1
             retake_structure, _ = StudentStructure.objects.get_or_create(
@@ -353,17 +393,19 @@ def evaluate_summer_courses(modeladmin, request, queryset):
             student.current_structure = retake_structure
             student.save(update_fields=['current_structure'])
 
-            # التعامل مع كل مادة على حدة بالنسبة للـ attempts
             for course in failed_courses:
-                max_prev = RepeatModel.objects.filter(student=student, course=course).aggregate(m=Max('retake_attempt_number'))['m'] or 0
+                max_prev = RepeatModel.objects.filter(
+                    student=student, course=course
+                ).aggregate(m=Max('retake_attempt_number'))['m'] or 0
                 new_attempt = max_prev + 1
 
                 if new_attempt > 2:
-                    # أي مادة attempt=3 → DroppedOut
-                    from structure.admin import create_droppedout_record_and_archive
-                    create_droppedout_record_and_archive(student, reason=f'Exceeded allowed repeat attempts for {course.name}')
+                    create_droppedout_record_and_archive(
+                        student,
+                        reason=f'Exceeded allowed repeat attempts for {course.name}'
+                    )
                     dropped += 1
-                    break  # نوقف باقي المواد لأن الطالب خرج نهائي
+                    continue  # ✅ مش break
                 else:
                     gs = GradeSheet.objects.filter(course=course).first()
                     RepeatModel.objects.get_or_create(
@@ -384,6 +426,9 @@ def evaluate_summer_courses(modeladmin, request, queryset):
     )
 
 
+# =========================================================
+# 🎯 الأكشن: تقييم مواد إعادة السنة
+# =========================================================
 @admin.action(description="🔁 تقييم مواد إعادة السنة (حسب أعلى attempt و Summer)")
 def evaluate_retake_courses(modeladmin, request, queryset):
     RepeatModel = get_model('structure', 'RepeatCourseRegistration')
@@ -403,7 +448,6 @@ def evaluate_retake_courses(modeladmin, request, queryset):
     for structure in queryset:
         students = Student.objects.filter(repeat_registrations__structure=structure).distinct()
         for student in students:
-            # جلب كل المواد غير المقيمة
             repeat_courses = RepeatModel.objects.filter(
                 student=student,
                 structure=structure,
@@ -413,28 +457,22 @@ def evaluate_retake_courses(modeladmin, request, queryset):
             if not repeat_courses.exists():
                 continue
 
-            # تحديد أعلى محاولة لكل مادة
             max_attempts = repeat_courses.values('course').annotate(
                 max_attempt=Max('retake_attempt_number')
             )
             highest_attempt = max([x['max_attempt'] for x in max_attempts], default=0)
 
-            # فلتر المواد حسب أعلى attempt فقط
             target_courses = [
                 rr for rr in repeat_courses if rr.retake_attempt_number == highest_attempt
             ]
 
             failed_courses = []
 
-            # تقييم كل مادة باستخدام evaluate_result()
             for rc in target_courses:
                 rc.evaluate_result()
                 if rc.state == 'راسب':
                     failed_courses.append(rc)
 
-            # -----------------------------------
-            # إذا نجح في كل المواد -> ينقل للسنة التالية
-            # -----------------------------------
             if not failed_courses:
                 passed += 1
                 next_structure, _ = StudentStructure.objects.get_or_create(
@@ -446,9 +484,6 @@ def evaluate_retake_courses(modeladmin, request, queryset):
                 student.save(update_fields=['current_structure'])
                 continue
 
-            # -----------------------------------
-            # إذا سقط في أي مادة -> Summer لكل المواد الفاشلة (حتى لو موجودة من قبل)
-            # -----------------------------------
             to_summer += 1
             summer_structure, _ = StudentStructure.objects.get_or_create(
                 department=structure.department,
@@ -473,7 +508,6 @@ def evaluate_retake_courses(modeladmin, request, queryset):
         request,
         f"🔁 إعادة السنة: ✅ ناجحين: {passed} | ☀️ دخلوا Summer: {to_summer}"
     )
-
 
 
 # =========================================================
